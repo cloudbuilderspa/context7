@@ -1,26 +1,54 @@
-#!/usr/bin/env node
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { searchLibraries, fetchLibraryDocumentation } from "./lib/api.js";
 import { formatSearchResults } from "./lib/utils.js";
 import dotenv from "dotenv";
+import express from "express";
+// Import Express types
+import type { Request, Response } from "express";
 
 // Load environment variables from .env file if present
 dotenv.config();
 
-// Get DEFAULT_MINIMUM_TOKENS from environment variable or use default
-let DEFAULT_MINIMUM_TOKENS = 10000;
-if (process.env.DEFAULT_MINIMUM_TOKENS) {
-  const parsedValue = parseInt(process.env.DEFAULT_MINIMUM_TOKENS, 10);
-  if (!isNaN(parsedValue) && parsedValue > 0) {
-    DEFAULT_MINIMUM_TOKENS = parsedValue;
-  } else {
-    console.warn(
-      `Warning: Invalid DEFAULT_MINIMUM_TOKENS value provided in environment variable. Using default value of 10000`
-    );
+// Environment variable configuration
+const DEFAULT_PORT = 3000;
+const PORT = getEnvVariableAsNumber('PORT', DEFAULT_PORT);
+const DEFAULT_MINIMUM_TOKENS = getEnvVariableAsNumber('DEFAULT_MINIMUM_TOKENS', 10000);
+
+// Helper function to safely parse and validate numeric environment variables
+interface ToolResponseContent {
+  type: "text" | "resource";
+  text?: string;
+  resource?: { text: string, uri: string };
+}
+
+interface ToolResponseType {
+  content: ToolResponseContent[];
+}
+
+interface ResolveLibraryParams {
+  libraryName: string;
+}
+
+interface GetLibraryDocsParams {
+  context7CompatibleLibraryID: string;
+  tokens?: number;
+  topic?: string;
+}
+
+function getEnvVariableAsNumber(variableName: string, defaultValue: number): number {
+  if (process.env[variableName]) {
+    const parsedValue = parseInt(process.env[variableName], 10);
+    if (!isNaN(parsedValue) && parsedValue > 0) {
+      return parsedValue;
+    } else {
+      console.warn(
+        `Warning: Invalid ${variableName} value provided in environment variable. Using default value of ${defaultValue}`
+      );
+    }
   }
+  return defaultValue;
 }
 
 // Create server instance
@@ -49,12 +77,11 @@ When selecting the best match, consider:
 
 Return the selected library ID and explain your choice. If there are multiple good matches, mention this but proceed with the most relevant one.`,
   {
-    libraryName: z
-      .string()
+    libraryName: z.string()
       .describe("Library name to search for and retrieve a Context7-compatible library ID."),
   },
-  async ({ libraryName }) => {
-    const searchResponse = await searchLibraries(libraryName);
+  async (args: ResolveLibraryParams): Promise<{ content: ({ type: "text", text: string } | { type: "resource", resource: { text: string, uri: string } })[] }> => {
+    const searchResponse = await searchLibraries(args.libraryName);
 
     if (!searchResponse || !searchResponse.results) {
       return {
@@ -108,8 +135,7 @@ server.tool(
   "get-library-docs",
   "Fetches up-to-date documentation for a library. You must call 'resolve-library-id' first to obtain the exact Context7-compatible library ID required to use this tool.",
   {
-    context7CompatibleLibraryID: z
-      .string()
+    context7CompatibleLibraryID: z.string()
       .describe(
         "Exact Context7-compatible library ID (e.g., 'mongodb/docs', 'vercel/nextjs') retrieved from 'resolve-library-id'."
       ),
@@ -118,27 +144,27 @@ server.tool(
       .optional()
       .describe("Topic to focus documentation on (e.g., 'hooks', 'routing')."),
     tokens: z
-      .preprocess((val) => (typeof val === "string" ? Number(val) : val), z.number())
-      .transform((val) => (val < DEFAULT_MINIMUM_TOKENS ? DEFAULT_MINIMUM_TOKENS : val))
+      .preprocess((val: any) => (typeof val === "string" ? Number(val) : val), z.number())
+      .transform((val: number) => (val < DEFAULT_MINIMUM_TOKENS ? DEFAULT_MINIMUM_TOKENS : val))
       .optional()
       .describe(
         `Maximum number of tokens of documentation to retrieve (default: ${DEFAULT_MINIMUM_TOKENS}). Higher values provide more context but consume more tokens.`
       ),
   },
-  async ({ context7CompatibleLibraryID, tokens = DEFAULT_MINIMUM_TOKENS, topic = "" }) => {
+  async (args: GetLibraryDocsParams): Promise<{ content: ({ type: "text", text: string } | { type: "resource", resource: { text: string, uri: string } })[] }> => {
     // Extract folders parameter if present in the ID
     let folders = "";
-    let libraryId = context7CompatibleLibraryID;
+    let libraryId = args.context7CompatibleLibraryID;
 
-    if (context7CompatibleLibraryID.includes("?folders=")) {
-      const [id, foldersParam] = context7CompatibleLibraryID.split("?folders=");
+    if (args.context7CompatibleLibraryID.includes("?folders=")) {
+      const [id, foldersParam] = args.context7CompatibleLibraryID.split("?folders=");
       libraryId = id;
       folders = foldersParam;
     }
 
     const documentationText = await fetchLibraryDocumentation(libraryId, {
-      tokens,
-      topic,
+      tokens: args.tokens,
+      topic: args.topic,
       folders,
     });
 
@@ -163,11 +189,70 @@ server.tool(
     };
   }
 );
+// Configure Express with SSE endpoint
+function setupExpressWithSSE() {
+  const app = express();
+  
+  // SSE endpoint setup
+  app.get('/events', (req: Request, res: Response) => {
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    // Send initial connection message
+    res.write('data: {"message": "Connected to MCP SSE Server"}\n\n');
+    
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log('Client disconnected from SSE stream');
+    });
+    
+    // Keep the connection alive with a heartbeat
+    const heartbeatInterval = setInterval(() => {
+      res.write(':\n\n'); // Comment line as heartbeat
+    }, 30000);
+    
+    // Clean up on client disconnect
+    req.on('close', () => {
+      clearInterval(heartbeatInterval);
+    });
+  });
+  
+  return app;
+}
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Context7 Documentation MCP Server running on stdio");
+  try {
+    // Set up Express with SSE endpoint
+    const app = setupExpressWithSSE();
+    
+    // Configure StreamableHTTPServerTransport (stateless mode)
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    
+    // Connect the MCP server to the transport
+    await server.connect(transport);
+
+    // Add MCP routes to Express app
+    // These routes will delegate to the transport's handleRequest method
+    app.all('/mcp', (req: Request, res: Response) => {
+      transport.handleRequest(req, res).catch(err => {
+        console.error("Error handling MCP request:", err);
+        if (!res.headersSent) {
+          res.status(500).send("Internal Server Error");
+        }
+      });
+    });
+    
+    // Start the server
+    app.listen(PORT, () => {
+      console.log(`MCP SSE server listening at http://localhost:${PORT}/events`);
+      console.log(`MCP main endpoint at http://localhost:${PORT}/mcp`);
+    });
+  } catch (error) {
+    console.error('Error starting MCP SSE server:', error);
+    process.exit(1);
+  }
 }
 
 main().catch((error) => {

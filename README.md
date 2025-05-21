@@ -330,6 +330,50 @@ bun run build
 npx -y @modelcontextprotocol/inspector npx @upstash/context7-mcp@latest
 ```
 
+### Exposing with ngrok
+
+To expose your MCP SSE server to the internet using ngrok:
+
+1. **Install ngrok**:
+   
+   If you don't have ngrok installed, download it from [ngrok.com](https://ngrok.com/download) or install it using npm:
+   
+   ```bash
+   npm install -g ngrok
+   ```
+   
+   You may need to sign up for a free ngrok account and configure your authtoken.
+
+2. **Run the server with a defined PORT**:
+   
+   First, make sure your server is running with a defined PORT environment variable:
+   
+   ```bash
+   PORT=3000 npx @upstash/context7-mcp@latest
+   ```
+   
+   The server will start and log: `MCP SSE server listening at http://localhost:3000/events`
+
+3. **Expose with ngrok**:
+   
+   In a separate terminal, run:
+   
+   ```bash
+   ngrok http 3000
+   ```
+   
+   You'll see output containing your public URLs, like:
+   
+   ```
+   Forwarding https://abc123.ngrok.io -> http://localhost:3000
+   ```
+
+4. **Use the exposed URL**:
+   
+   Your MCP SSE server is now accessible at: `https://abc123.ngrok.io/events`
+   
+   You can use this URL in your client applications or share it with others who need to access your server.
+
 ## Troubleshooting
 
 ### ERR_MODULE_NOT_FOUND
