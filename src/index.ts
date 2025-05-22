@@ -199,22 +199,38 @@ function setupExpressWithSSE() {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders(); // Flush the headers to establish the connection
+
+    console.log('Client connected to SSE stream');
+
+    // Send a retry event to the client (e.g., retry after 10 seconds)
+    res.write('retry: 10000\n\n');
     
     // Send initial connection message
     res.write('data: {"message": "Connected to MCP SSE Server"}\n\n');
+        
+    // Keep the connection alive with a heartbeat
+    const heartbeatInterval = setInterval(() => {
+      // Check if the connection is still open before writing
+      if (!res.writableEnded) {
+        res.write(':\n\n'); // Comment line as heartbeat
+      } else {
+        // If not writable, clear interval and log
+        clearInterval(heartbeatInterval);
+        console.log('SSE heartbeat: Connection was already closed. Interval cleared.');
+      }
+    }, 30000); // Send heartbeat every 30 seconds
     
     // Handle client disconnect
     req.on('close', () => {
       console.log('Client disconnected from SSE stream');
+      clearInterval(heartbeatInterval); // Clear the heartbeat interval
+      // Add any other cleanup logic here (e.g., removing listeners from other event sources)
     });
-    
-    // Keep the connection alive with a heartbeat
-    const heartbeatInterval = setInterval(() => {
-      res.write(':\n\n'); // Comment line as heartbeat
-    }, 30000);
-    
-    // Clean up on client disconnect
-    req.on('close', () => {
+
+    // Optional: Handle errors on the response stream
+    res.on('error', (err) => {
+      console.error('Error on SSE response stream:', err);
       clearInterval(heartbeatInterval);
     });
   });
